@@ -396,6 +396,24 @@ fn parse_g_says_passthrough(g_output: &str) -> bool {
 /// Every `exec` therefore reattaches stdin to `/dev/tty`, or the interactive
 /// shell would inherit the exhausted pipe and exit immediately.
 #[cfg(windows)]
+/// The base64 launcher every Pebrel SSH session appends as its remote
+/// command; the remote decodes it and execs an integrated bash/zsh.
+///
+/// Guest panes reuse it verbatim (`wsl.exe ... ssh`), so a connection made
+/// from inside a distribution reports cwd and command boundaries exactly
+/// like a native pane instead of running an unintegrated login shell.
+#[cfg(windows)]
+pub(crate) fn integration_launcher() -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let shell = nebula_terminal::tty::connection_shell();
+    let bootstrap = build_bootstrap(
+        &b64.encode(format!("{REMOTE_BASH}\n{shell}")),
+        &b64.encode(format!("{REMOTE_ZSH}\n{shell}")),
+    );
+    format!("echo {} | base64 -d | sh", b64.encode(&bootstrap))
+}
+
 fn build_bootstrap(bash_b64: &str, zsh_b64: &str) -> String {
     format!(
         "export NEBULA_SSH=1; \
@@ -541,9 +559,38 @@ fn parse_ssh_config_hosts(text: &str) -> Vec<String> {
     hosts
 }
 
+/// Aliases from the host config plus every WSL distribution this user owns.
+///
+/// Host entries keep the host file first: the host config is what `ssh` reads
+/// when a pane runs on Windows, and it is available synchronously. Guest
+/// aliases follow, de-duplicated, and only when a guest answer is already
+/// cached: asking the guest here would run a distribution on a render path.
 pub fn ssh_config_hosts() -> Vec<String> {
-    let Some(home) = crate::platform::dirs::home_dir() else { return Vec::new() };
-    hosts::discover(&home.join(".ssh/config"), &home.join(".ssh"), &home, &|| false)
+    let mut hosts = Vec::new();
+    if let Some(home) = crate::platform::dirs::home_dir() {
+        hosts = hosts::discover(&home.join(".ssh/config"), &home.join(".ssh"), &home, &|| false);
+    }
+    for host in guest_ssh_config_hosts() {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// Guest aliases whose answer is already in the WSL cache; a miss starts one
+/// worker and answers [] this time. Non-Windows hosts have no WSL to ask.
+fn guest_ssh_config_hosts() -> Vec<String> {
+    crate::platform::wsl_ssh::cached_hosts(&|| false)
+}
+
+/// The WSL distribution that declares `host`, when a cached guest answer owns it.
+///
+/// An alias found in a guest is re-entered through that guest: the private key
+/// that authenticates it lives there, and the Windows configuration would
+/// resolve the same spelling against a different machine.
+pub(crate) fn guest_distro_for(host: &str) -> Option<String> {
+    crate::platform::wsl_ssh::owner(host, &|| false).map(|target| target.distro)
 }
 
 fn askpass_destination_from_args(args: &[String]) -> Option<String> {

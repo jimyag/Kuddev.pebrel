@@ -1,4 +1,8 @@
 //! 只发现字面 Host 别名；不运行 ssh -G，避免 Match exec 在补齐时执行用户命令。
+//!
+//! `collect` 是同一套预算与 Include 规则的已读文本版本
+//! （`discover` 直接读盘），WSL 来宾由 `platform::wsl_ssh` 交出文件列表，
+//! 两边共用解析、去重与截断。
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -20,8 +24,44 @@ pub(crate) fn discover(
         entries: 4096,
         visited: HashSet::new(),
         hosts: Vec::new(),
+        follow_includes: true,
     };
     scan.file(config, 0);
+    if cancelled() { Vec::new() } else { scan.hosts }
+}
+
+/// Same Scan budget, fed with text instead of disk paths.
+///
+/// Guest paths live in the guest file system: the host can neither canonicalize
+/// nor reopen them, so the identity comes from the caller. Parsing, Host
+/// de-duplication and the 1024 entry cap are exactly those of `discover`.
+pub(crate) fn collect<'a>(
+    files: impl IntoIterator<Item = (String, &'a str)>,
+    include_root: &Path,
+    home: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Vec<String> {
+    let mut scan = Scan {
+        include_root,
+        home,
+        cancelled,
+        started: Instant::now(),
+        bytes: 1024 * 1024,
+        entries: 4096,
+        visited: HashSet::new(),
+        hosts: Vec::new(),
+        follow_includes: false,
+    };
+    for (identity, text) in files {
+        if scan.stopped() || scan.bytes == 0 || scan.visited.len() >= 64 {
+            break;
+        }
+        if text.len() > scan.bytes || !scan.visited.insert(PathBuf::from(identity)) {
+            continue;
+        }
+        scan.bytes = scan.bytes.saturating_sub(text.len());
+        scan.hosts_from(text, 0);
+    }
     if cancelled() { Vec::new() } else { scan.hosts }
 }
 
@@ -34,6 +74,9 @@ struct Scan<'a> {
     entries: usize,
     visited: HashSet<PathBuf>,
     hosts: Vec<String>,
+    /// A guest listing already expanded its own Include entries, so their
+    /// paths are absent from the host file system and must not be followed.
+    follow_includes: bool,
 }
 
 impl Scan<'_> {
@@ -66,6 +109,11 @@ impl Scan<'_> {
             return;
         }
         let Ok(text) = String::from_utf8(bytes) else { return };
+        self.hosts_from(&text, depth);
+    }
+
+    /// 逐行解析一份已读入的文本。来宾来源不经盘路径，只能走这里。
+    fn hosts_from(&mut self, text: &str, depth: usize) {
         for line in text.lines() {
             if self.stopped() {
                 return;
@@ -81,6 +129,9 @@ impl Scan<'_> {
                         return;
                     }
                 }
+            } else if !self.follow_includes {
+                // A guest listing already contains every Included file.
+                continue;
             } else if keyword.eq_ignore_ascii_case("include") {
                 for pattern in &tokens[1..] {
                     // %h/环境变量/其他用户的 ~ 依赖运行时上下文，不能猜测展开结果。

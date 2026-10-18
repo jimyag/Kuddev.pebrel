@@ -1280,9 +1280,29 @@ impl NebulaWorkspace {
             }
         }
         let grid = self.inherited_grid(cx);
-        let launch = crate::gpui_shell::terminal::view::TerminalLaunch::Ssh {
-            destination: destination.clone(),
-            cwd: remote_cwd,
+        // A host declared by a WSL guest is entered through that guest: its
+        // private key lives there and never leaves it, and the Windows `ssh`
+        // would resolve the same spelling against the host configuration.
+        let guest = Self::guest_ssh_launch(&destination);
+        // A guest pane is an ordinary local launch of `wsl.exe ... ssh`, so the
+        // saved tab must describe that shell rather than an SSH destination:
+        // the two would otherwise disagree on restore, and a rescue through
+        // `add_ssh_terminal` would depend on a warm guest cache.
+        let saved_launch = guest.as_ref().map(|shell| crate::session::LaunchSession::Shell {
+            name: destination.clone(),
+            program: shell.program().to_owned(),
+            args: shell.args().to_vec(),
+        });
+        let launch = match guest {
+            Some(shell) => crate::gpui_shell::terminal::view::TerminalLaunch::Local {
+                cwd: None,
+                shell: Some(shell),
+                shell_name: Some(destination.clone()),
+            },
+            None => crate::gpui_shell::terminal::view::TerminalLaunch::Ssh {
+                destination: destination.clone(),
+                cwd: remote_cwd,
+            },
         };
         let pane = self.new_pane(grid, launch, None, window, cx);
         let focused = pane.id;
@@ -1300,7 +1320,10 @@ impl NebulaWorkspace {
             tab,
             TabMeta {
                 shell_tag: Some("ssh".into()),
-                launch: Some(crate::session::LaunchSession::Ssh { host: destination }),
+                launch: Some(
+                    saved_launch
+                        .unwrap_or(crate::session::LaunchSession::Ssh { host: destination }),
+                ),
                 ..TabMeta::default()
             },
         );
@@ -1311,6 +1334,15 @@ impl NebulaWorkspace {
         cx.notify();
     }
 
+    /// The guest that owns `host`, expressed as the process to run.
+    ///
+    /// `wsl.exe -d <distro> ssh <host>` keeps the guest in charge of the
+    /// whole connection: the private key, `known_hosts` and any `ProxyJump`
+    /// stay inside the distribution, and nothing is copied to Windows.
+    fn guest_ssh_launch(host: &str) -> Option<nebula_terminal::tty::Shell> {
+        let distro = crate::ssh::guest_distro_for(host)?;
+        Some(crate::shell_detect::wsl_ssh_shell(&distro, host))
+    }
     /// 在同一 tab、同一分屏位置替换失败的 SSH pane。先把新实体及订阅完整
     /// 建好，再原子替换树叶和 pane 所有权；旧实体的异步泵只会更新旧 Entity，
     /// 因而无法把迟到的 Failed/Ready 写进新连接。

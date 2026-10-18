@@ -81,7 +81,16 @@ impl Cache {
         let names = cached.unwrap_or_else(|| {
             let names: Arc<[String]> = match &key {
                 Key::Ssh { config, home } => {
-                    crate::ssh::hosts::discover(config, &home.join(".ssh"), home, cancelled)
+                    let mut names =
+                        crate::ssh::hosts::discover(config, &home.join(".ssh"), home, cancelled);
+                    // A guest alias spelled like a host alias need not reach the same
+                    // machine, so the guest names are only added, never merged away.
+                    for host in guest_hosts(cancelled) {
+                        if !names.contains(&host) {
+                            names.push(host);
+                        }
+                    }
+                    names
                 },
                 Key::Wsl => crate::platform::shell::registered_wsl_distros(cancelled),
             }
@@ -94,5 +103,35 @@ impl Cache {
             names
         });
         if cancelled() { Vec::new() } else { context.candidates(names.iter().map(String::as_str)) }
+    }
+}
+
+/// Aliases from the WSL guests whose answer is already cached. A miss starts
+/// one worker on the existing completion thread and contributes nothing yet;
+/// this never starts a distribution or reads the host config twice.
+fn guest_hosts(cancelled: &dyn Fn() -> bool) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut hosts = Vec::new();
+        for distro in crate::platform::shell::registered_wsl_distros(cancelled) {
+            if cancelled() {
+                return Vec::new();
+            }
+            let target = crate::platform::wsl_ssh::Target::new(distro, None);
+            let Some(answer) = crate::platform::wsl_ssh::cached(&target, cancelled) else {
+                continue;
+            };
+            for host in answer.hosts {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+        }
+        hosts
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cancelled;
+        Vec::new()
     }
 }

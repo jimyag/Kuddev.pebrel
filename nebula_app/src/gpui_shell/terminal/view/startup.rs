@@ -107,6 +107,16 @@ impl TerminalView {
         // WSL 的启动目录属于宿主，必须保持空值，直到来宾自己报告 cwd。
         let mut completion_cwd = String::new();
         let mut startup_intro = false;
+        // The pane the guest answers for: a WSL distribution running its own
+        // `ssh`. Recorded for the tab label and for the saved tab metadata so
+        // the tab and its pane describe the same launch.
+        let guest_host = match &launch {
+            TerminalLaunch::Local { shell, .. } => shell.as_ref().and_then(|shell| {
+                crate::shell_detect::guest_ssh_host(shell.program(), shell.args())
+                    .map(str::to_owned)
+            }),
+            TerminalLaunch::Ssh { .. } => None,
+        };
         let (
             ssh_destination,
             initial_title,
@@ -321,6 +331,8 @@ impl TerminalView {
             port_forwards: Vec::new(),
             port_forward_task: None,
             ssh_label: None,
+            guest_host,
+            guest_dir: None,
             exec_context,
             ssh_stage: None,
             ssh_connect: None,

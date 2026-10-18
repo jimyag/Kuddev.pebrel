@@ -349,6 +349,15 @@ pub struct TerminalView {
     pub(crate) port_forwards: Vec<crate::ssh_session::LocalForward>,
     pub(crate) port_forward_task: Option<gpui::Task<()>>,
     ssh_label: Option<String>,
+    /// Guest alias this pane runs through its own distribution (`wsl.exe ...
+    /// --exec ssh <host>`). Labels the tab; it is not a native SSH pane, so
+    /// `ssh_destination` stays empty and no remote feature keys off it.
+    guest_host: Option<String>,
+    /// Directory the guest's `ssh` reported for the far side. Kept apart from
+    /// [`Self::cwd`]: that field is a Windows path that local views, the file
+    /// panel and session restore treat as this machine's, while this one
+    /// belongs to the host the guest connected to.
+    guest_dir: Option<String>,
     /// 创建本地 PTY 时冻结的受控环境，供独立 `pane.exec` child 复用。
     pub(crate) exec_context: Option<crate::runtime_exec::PaneExecContext>,
     /// SSH 连接阶段（业务层上报）：Ready 前画连接横幅，Failed 驻留错误。
@@ -558,12 +567,23 @@ impl TerminalView {
     }
 
     pub(super) fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
-        let cwd_changed = cwd_report::apply(&mut self.cwd, &event);
+        let mut cwd_changed = cwd_report::apply(&mut self.cwd, &event);
+        // A guest pane runs `ssh` inside the distribution, so the path it
+        // reports belongs to the far side. Keep it for the tab label and leave
+        // `cwd` empty, which is what every local consumer of that field means.
+        if cwd_changed && self.guest_host.is_some() {
+            if !self.cwd.is_empty() {
+                self.guest_dir = Some(std::mem::take(&mut self.cwd));
+            }
+            cwd_changed = false;
+        }
         // Both shell metadata channels update completion and directory history.
-        if cwd_changed
-            || ((matches!(&event, TermEvent::CwdReport(_))
-                || matches!(&event, TermEvent::Title(title) if title.starts_with("NEBULA|")))
-                && self.suggest.cwd != self.cwd)
+        let guest = self.guest_host.is_some();
+        if !guest
+            && (cwd_changed
+                || ((matches!(&event, TermEvent::CwdReport(_))
+                    || matches!(&event, TermEvent::Title(title) if title.starts_with("NEBULA|")))
+                    && self.suggest.cwd != self.cwd))
         {
             self.suggest.cwd = self.cwd.clone();
             if self.suggest.suggest_env.is_this_machine() {

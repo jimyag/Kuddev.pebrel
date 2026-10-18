@@ -60,6 +60,16 @@ impl TerminalView {
         if let Some(destination) = &self.ssh_destination {
             return self.ssh_label.as_ref().unwrap_or(destination).clone();
         }
+        // A guest pane shows the directory its own `ssh` reports, because that
+        // is the pane's live state; before the first report the alias it runs
+        // is the only stable name it has.
+        if let Some(host) = &self.guest_host {
+            return self
+                .guest_dir
+                .as_deref()
+                .and_then(last_path_component)
+                .unwrap_or_else(|| host.clone());
+        }
         last_path_component(&self.cwd)
             .or_else(|| {
                 std::env::current_dir()

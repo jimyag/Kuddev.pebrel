@@ -658,6 +658,46 @@ fn wsl_raw_arg(value: &str) -> Option<String> {
     Some(if value.contains([' ', '\t']) { format!("\"{value}\"") } else { value.to_owned() })
 }
 
+/// The guest alias a launch runs, when it is a `wsl.exe ... --exec ssh <host>`
+/// pane. The alias is the tab label until that pane reports a directory, and
+/// the token the saved session is recognised by.
+pub(crate) fn guest_ssh_host<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    if !is_wsl_launcher(program) {
+        return None;
+    }
+    let exec = args.iter().position(|arg| arg == "--exec")?;
+    if args.get(exec + 1).map(String::as_str) != Some("ssh") {
+        return None;
+    }
+    // Options (`-t`, and anything a later caller adds) come before the
+    // destination, so the first bare word after `ssh` is the host.
+    args.iter().skip(exec + 2).find(|arg| !arg.starts_with('-')).map(String::as_str)
+}
+
+/// A pane that runs the guest's own `ssh` for a host that guest declares.
+///
+/// The alias is passed as one literal argument after `--exec`, so the guest
+/// never sees it as shell text and no re-parsing can turn it into a command.
+/// `--exec` also keeps the login shell out of the path: `ssh` starts directly,
+/// which is what makes the guest's own config, keys and agent apply.
+pub(crate) fn wsl_ssh_shell(distro: &str, host: &str) -> nebula_terminal::tty::Shell {
+    let mut args = vec![
+        "-d".to_owned(),
+        distro.to_owned(),
+        "--exec".to_owned(),
+        "ssh".to_owned(),
+        // A remote PTY is what makes the far side interactive, and the
+        // launcher below only installs its hooks into an interactive shell.
+        "-t".to_owned(),
+        host.to_owned(),
+    ];
+    // Without this the guest runs a plain login shell: no cwd, no command
+    // boundaries, and nothing for the tab or the remote views to follow.
+    #[cfg(windows)]
+    args.push(crate::ssh::integration_launcher());
+    nebula_terminal::tty::Shell::new("wsl.exe".to_owned(), args)
+}
+
 /// Raw WSL startup options use a different parser from the argv after `--exec`.
 /// Keep the verified quote boundary for injected `--cd` values only; direct-exec
 /// arguments retain `Command`'s native quoting.
@@ -1576,5 +1616,57 @@ test "$token" = "$__pebrel_shell_token" || exit 96
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), shells.len());
+    }
+}
+#[cfg(test)]
+mod guest_connect_tests {
+    use super::*;
+
+    #[test]
+    fn a_guest_launch_runs_the_guest_ssh_with_a_literal_alias() {
+        let shell = wsl_ssh_shell("Debian", "los");
+        assert_eq!(shell.program(), "wsl.exe");
+        // A remote PTY so the launcher can install an interactive shell.
+        assert_eq!(&shell.args()[..6], ["-d", "Debian", "--exec", "ssh", "-t", "los"]);
+        // Windows also appends the shared integration launcher; the guest never
+        // sees the alias as shell text either way.
+        #[cfg(windows)]
+        assert_eq!(shell.args().len(), 7);
+        #[cfg(not(windows))]
+        assert_eq!(shell.args().len(), 6);
+    }
+
+    #[test]
+    fn a_distinctive_alias_stays_one_argument_even_with_shell_metacharacters() {
+        // The alias reaches `ssh` as a single argv entry, never as shell text,
+        // so a name that looks like a command cannot become one in the guest.
+        let shell = wsl_ssh_shell("Debian", "a;b$(id)");
+        assert_eq!(shell.args().get(5).map(String::as_str), Some("a;b$(id)"));
+    }
+
+    #[test]
+    fn a_guest_launch_reports_the_alias_it_runs() {
+        let shell = wsl_ssh_shell("Debian", "los");
+        assert_eq!(guest_ssh_host(shell.program(), shell.args()), Some("los"));
+    }
+
+    #[test]
+    fn ordinary_shells_and_wsl_panes_without_ssh_name_no_alias() {
+        assert_eq!(guest_ssh_host("powershell.exe", &[]), None);
+        assert_eq!(guest_ssh_host("wsl.exe", &["-d".to_owned()]), None);
+        // A guest command that merely mentions ssh is not our launch shape.
+        assert_eq!(
+            guest_ssh_host(
+                "wsl.exe",
+                &[
+                    "-d".to_owned(),
+                    "Debian".to_owned(),
+                    "--exec".to_owned(),
+                    "bash".to_owned(),
+                    "ssh".to_owned(),
+                ]
+            ),
+            None
+        );
     }
 }

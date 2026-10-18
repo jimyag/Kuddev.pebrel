@@ -256,6 +256,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 crate::gpui_shell::workspace::shell_launch::startup_shell(shell_id)
             });
         }
+        // The SSH host list is built lazily, and a guest alias needs a round
+        // trip into a distribution, so the first open would show only host
+        // aliases. Ask once here; the answer is cached for the process.
+        std::thread::spawn(|| {
+            let _ = crate::platform::wsl_ssh::cached_hosts(&|| false);
+        });
         gpui_shell::run_shell(
             initial_cwd,
             terminal_options.command(),

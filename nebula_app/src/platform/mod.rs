@@ -62,6 +62,7 @@ pub(crate) mod window_material;
 pub(crate) mod window_visibility;
 pub(crate) mod wsl_guest_shell;
 pub(crate) mod wsl_hooks;
+pub(crate) mod wsl_ssh;
 
 pub use capabilities::CAPABILITIES;
 
